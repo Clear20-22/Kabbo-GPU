@@ -51,7 +51,7 @@ print("Device:", device)
 # SAVE PATH
 # =========================================================
 
-SAVE_DIR = "/content/drive/MyDrive/Colab Notebooks/Equation/saved_models"
+SAVE_DIR = "saved_models"
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -161,21 +161,21 @@ class RegressionDataset(Dataset):
 
 train_loader = DataLoader(
     RegressionDataset(X_train, y_train),
-    batch_size=4096,
+    batch_size=8192,
     shuffle=True,
     pin_memory=True
 )
 
 val_loader = DataLoader(
     RegressionDataset(X_val, y_val),
-    batch_size=4096,
+    batch_size=8192,
     shuffle=False,
     pin_memory=True
 )
 
 test_loader = DataLoader(
     RegressionDataset(X_test, y_test),
-    batch_size=4096,
+    batch_size=8192,
     shuffle=False,
     pin_memory=True
 )
