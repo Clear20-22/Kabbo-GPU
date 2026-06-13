@@ -1,11 +1,5 @@
-.venv/
-venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-ENV/
-.env
-.ipynb_checkpoints/
+.DS_Store
+FaceAI/.DS_Store
+*.zip
+*.pt
+*.pth
