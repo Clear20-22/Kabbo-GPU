@@ -21,10 +21,11 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
+from torch.amp import autocast, GradScaler
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -43,6 +44,9 @@ device = torch.device(
     "cuda" if torch.cuda.is_available()
     else "cpu"
 )
+
+if device.type == "cuda":
+    torch.backends.cudnn.benchmark = True
 
 print("Device:", device)
 
@@ -103,23 +107,49 @@ print("y Shape:", y.shape)
 # CELL 4 - TRAIN VALID TEST SPLIT
 # =========================================================
 
-X_train, X_temp, y_train, y_temp = train_test_split(
-    X,
-    y,
-    test_size=0.3,
-    random_state=SEED
-)
+def build_split_dataset(X, y, test_size=0.30, val_size=0.50, n_bins=20, edge_threshold=4.5):
 
-X_val, X_test, y_val, y_test = train_test_split(
-    X_temp,
-    y_temp,
-    test_size=0.5,
-    random_state=SEED
-)
+    y_abs = np.abs(y).ravel()
+    quantiles = np.quantile(y_abs, np.linspace(0.0, 1.0, n_bins + 1))
+    bins = np.minimum(np.digitize(y_abs, quantiles[1:-1]), n_bins - 1)
 
-print("Train:", X_train.shape)
-print("Val  :", X_val.shape)
-print("Test :", X_test.shape)
+    edge_flag = np.any(np.abs(X) >= edge_threshold, axis=1).astype(np.int32)
+    strata = bins * 2 + edge_flag
+
+    X_train, X_temp, y_train, y_temp, strata_train, strata_temp = train_test_split(
+        X,
+        y,
+        strata,
+        test_size=test_size,
+        random_state=SEED,
+        stratify=strata,
+    )
+
+    X_val, X_test, y_val, y_test, _, _ = train_test_split(
+        X_temp,
+        y_temp,
+        strata_temp,
+        test_size=val_size,
+        random_state=SEED,
+        stratify=strata_temp,
+    )
+
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def summary_counts(X, y, name, edge_threshold=4.5, low_quantile=0.1):
+
+    y_abs = np.abs(y).ravel()
+    edge = np.any(np.abs(X) >= edge_threshold, axis=1)
+    low = y_abs <= np.quantile(y_abs, low_quantile)
+    print(f"{name}: {len(X)} samples | edge {edge.sum()} | low-output {low.sum()}")
+
+
+X_train, X_val, X_test, y_train, y_val, y_test = build_split_dataset(X, y)
+
+summary_counts(X_train, y_train, "Train")
+summary_counts(X_val, y_val, "Val")
+summary_counts(X_test, y_test, "Test")
 
 # =========================================================
 # CELL 5 - SCALING
@@ -155,6 +185,117 @@ class RegressionDataset(Dataset):
 
         return self.X[idx], self.y[idx]
 
+
+def percent_error(y_true, y_pred, min_denominator=1e-2):
+
+    denom = np.maximum(np.abs(y_true), min_denominator)
+    return np.abs(y_pred - y_true) / denom * 100.0
+
+
+def metric_report(y_true, preds):
+
+    y_true = np.asarray(y_true, dtype=np.float32)
+    preds = np.asarray(preds, dtype=np.float32)
+    pct_error = percent_error(y_true, preds)
+
+    return {
+        "mse": float(mean_squared_error(y_true, preds)),
+        "rmse": float(np.sqrt(mean_squared_error(y_true, preds))),
+        "mae": float(mean_absolute_error(y_true, preds)),
+        "r2": float(r2_score(y_true, preds)),
+        "mean_pct_error": float(np.mean(pct_error)),
+        "max_pct_error": float(np.max(pct_error)),
+        "within_1pct": float(np.mean(pct_error <= 1.0)) * 100.0,
+        "within_5pct": float(np.mean(pct_error <= 5.0)) * 100.0,
+        "within_10pct": float(np.mean(pct_error <= 10.0)) * 100.0,
+    }
+
+
+def print_report(name, report):
+
+    print(f"\n=== {name} ===")
+    print(f"MSE        : {report['mse']:.8f}")
+    print(f"RMSE       : {report['rmse']:.8f}")
+    print(f"MAE        : {report['mae']:.8f}")
+    print(f"R2         : {report['r2']:.8f}")
+    print(f"Mean % err : {report['mean_pct_error']:.4f}%")
+    print(f"Max % err  : {report['max_pct_error']:.4f}%")
+    print(f"Within 1%  : {report['within_1pct']:.2f}%")
+    print(f"Within 5%  : {report['within_5pct']:.2f}%")
+    print(f"Within 10% : {report['within_10pct']:.2f}%")
+
+
+def make_edge_samples(sample_count=50000, noise_std=0.2):
+
+    rng = np.random.default_rng(SEED + 1)
+    X_edge = rng.choice([-5.0, 5.0], size=(sample_count, 5)).astype(np.float32)
+    X_edge += rng.normal(0.0, noise_std, size=X_edge.shape).astype(np.float32)
+    X_edge = np.clip(X_edge, -5.0, 5.0)
+    y_edge = equation(
+        X_edge[:, 0],
+        X_edge[:, 1],
+        X_edge[:, 2],
+        X_edge[:, 3],
+        X_edge[:, 4],
+    ).reshape(-1, 1).astype(np.float32)
+
+    return X_edge, y_edge
+
+
+def select_low_output_samples(X, y, count=20000):
+
+    sorted_idx = np.argsort(np.abs(y).ravel())
+    selected_idx = sorted_idx[:count]
+    return X[selected_idx], y[selected_idx]
+
+
+def build_augmented_train_loader(X_train, y_train, x_scaler, y_scaler, batch_size=8192):
+
+    rng = np.random.default_rng(SEED + 2)
+    X_train = np.asarray(X_train, dtype=np.float32)
+    y_train = np.asarray(y_train, dtype=np.float32)
+
+    low_threshold = np.quantile(np.abs(y_train), 0.15)
+    low_idx = np.where(np.abs(y_train).ravel() <= low_threshold)[0]
+    n_low = min(len(low_idx), int(0.25 * len(X_train)))
+    if n_low > 0:
+        low_choice = rng.choice(low_idx, size=n_low, replace=True)
+        X_low = X_train[low_choice]
+        y_low = y_train[low_choice]
+    else:
+        X_low = np.zeros((0, 5), dtype=np.float32)
+        y_low = np.zeros((0, 1), dtype=np.float32)
+
+    n_edge = int(0.15 * len(X_train))
+    X_edge = rng.choice([-5.0, 5.0], size=(n_edge, 5)).astype(np.float32)
+    X_edge += rng.normal(0.0, 0.18, size=X_edge.shape).astype(np.float32)
+    X_edge = np.clip(X_edge, -5.0, 5.0)
+    y_edge = equation(
+        X_edge[:, 0],
+        X_edge[:, 1],
+        X_edge[:, 2],
+        X_edge[:, 3],
+        X_edge[:, 4],
+    ).reshape(-1, 1).astype(np.float32)
+
+    X_aug = np.vstack([X_train, X_low, X_edge])
+    y_aug = np.vstack([y_train, y_low, y_edge])
+
+    perm = rng.permutation(len(X_aug))
+    X_aug = X_aug[perm]
+    y_aug = y_aug[perm]
+
+    X_aug_scaled = x_scaler.transform(X_aug)
+    y_aug_scaled = y_scaler.transform(y_aug)
+
+    return DataLoader(
+        RegressionDataset(X_aug_scaled, y_aug_scaled),
+        batch_size=batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=min(4, os.cpu_count() or 1),
+    )
+
 # =========================================================
 # CELL 7 - DATALOADER
 # =========================================================
@@ -163,21 +304,24 @@ train_loader = DataLoader(
     RegressionDataset(X_train, y_train),
     batch_size=8192,
     shuffle=True,
-    pin_memory=True
+    pin_memory=True,
+    num_workers=min(4, os.cpu_count() or 1),
 )
 
 val_loader = DataLoader(
     RegressionDataset(X_val, y_val),
     batch_size=8192,
     shuffle=False,
-    pin_memory=True
+    pin_memory=True,
+    num_workers=min(4, os.cpu_count() or 1),
 )
 
 test_loader = DataLoader(
     RegressionDataset(X_test, y_test),
     batch_size=8192,
     shuffle=False,
-    pin_memory=True
+    pin_memory=True,
+    num_workers=min(4, os.cpu_count() or 1),
 )
 
 # =========================================================
@@ -226,7 +370,7 @@ class MLP(nn.Module):
 # CELL 9 - TRAIN FUNCTION
 # =========================================================
 
-def train_model(model, name):
+def train_model(model, name, train_loader, val_loader, x_scaler, y_scaler, X_val, y_val):
 
     model = model.to(device)
 
@@ -245,7 +389,12 @@ def train_model(model, name):
         patience=10
     )
 
+    scaler = GradScaler()
+    y_mean = torch.tensor(y_scaler.mean_, dtype=torch.float32, device=device)
+    y_scale = torch.tensor(y_scaler.scale_, dtype=torch.float32, device=device)
+
     best_val_loss = float("inf")
+    best_within_1pct = -1.0
 
     patience = 40
     counter = 0
@@ -254,6 +403,7 @@ def train_model(model, name):
         "epoch": [],
         "train_loss": [],
         "val_loss": [],
+        "val_within_1pct": [],
         "lr": []
     }
 
@@ -274,18 +424,30 @@ def train_model(model, name):
 
             optimizer.zero_grad()
 
-            pred = model(xb)
+            with autocast(device_type=device.type, enabled=(device.type == "cuda")):
+                pred = model(xb)
+                base_loss = criterion(pred, yb)
 
-            loss = criterion(pred, yb)
+                y_orig = yb * y_scale + y_mean
+                pred_orig = pred * y_scale + y_mean
 
-            loss.backward()
+                abs_err = torch.abs(pred_orig - y_orig)
+                rel_error = abs_err / torch.clamp(torch.abs(y_orig), min=1e-2)
+                rel_loss = torch.mean(rel_error)
 
+                tol = torch.clamp(torch.abs(y_orig), min=1e-2) * 0.01
+                threshold_penalty = torch.mean(torch.relu(abs_err - tol) ** 2)
+
+                loss = base_loss + 0.18 * rel_loss + 4.0 * threshold_penalty
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 1.0
             )
-
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             train_loss += loss.item() * xb.size(0)
 
@@ -298,6 +460,8 @@ def train_model(model, name):
         model.eval()
 
         val_loss = 0.0
+        val_preds = []
+        val_trues = []
 
         with torch.no_grad():
 
@@ -307,12 +471,18 @@ def train_model(model, name):
                 yb = yb.to(device, non_blocking=True)
 
                 pred = model(xb)
+                val_loss += criterion(pred, yb).item() * xb.size(0)
 
-                loss = criterion(pred, yb)
-
-                val_loss += loss.item() * xb.size(0)
+                val_preds.append(pred.cpu().numpy())
+                val_trues.append(yb.cpu().numpy())
 
         val_loss /= len(val_loader.dataset)
+        val_preds = np.concatenate(val_preds, axis=0)
+        val_trues = np.concatenate(val_trues, axis=0)
+
+        val_preds_orig = y_scaler.inverse_transform(val_preds)
+        val_trues_orig = y_scaler.inverse_transform(val_trues)
+        val_report = metric_report(val_trues_orig, val_preds_orig)
 
         scheduler.step(val_loss)
 
@@ -325,6 +495,7 @@ def train_model(model, name):
         history["epoch"].append(epoch + 1)
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
+        history["val_within_1pct"].append(val_report["within_1pct"])
         history["lr"].append(current_lr)
 
         # =====================================================
@@ -336,26 +507,33 @@ def train_model(model, name):
             f"Epoch {epoch+1:03d} | "
             f"LR {current_lr:.7f} | "
             f"Train {train_loss:.8f} | "
-            f"Val {val_loss:.8f}"
+            f"Val {val_loss:.8f} | "
+            f"Val within 1% {val_report['within_1pct']:.2f}%"
         )
 
         # =====================================================
         # SAVE BEST MODEL
         # =====================================================
 
-        if val_loss < best_val_loss:
+        if (
+            val_report["within_1pct"] > best_within_1pct
+            or (
+                val_report["within_1pct"] == best_within_1pct
+                and val_loss < best_val_loss
+            )
+        ):
 
             best_val_loss = val_loss
-
+            best_within_1pct = val_report["within_1pct"]
             counter = 0
 
-            # SAVE BEST MODEL EVERY TIME
             torch.save(
                 {
                     "epoch": epoch + 1,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": val_loss
+                    "val_loss": val_loss,
+                    "val_within_1pct": val_report["within_1pct"],
                 },
                 f"{SAVE_DIR}/{name}_best.pth"
             )
@@ -395,7 +573,7 @@ def train_model(model, name):
 # CELL 10 - EVALUATION
 # =========================================================
 
-def evaluate(model):
+def evaluate_loader(model, loader, y_scaler):
 
     model.eval()
 
@@ -404,89 +582,111 @@ def evaluate(model):
 
     with torch.no_grad():
 
-        for xb, yb in test_loader:
+        for xb, yb in loader:
 
             xb = xb.to(device)
-
             pred = model(xb)
 
             preds.append(pred.cpu().numpy())
             trues.append(yb.numpy())
 
-    preds = np.concatenate(preds)
-    trues = np.concatenate(trues)
+    preds = np.concatenate(preds, axis=0)
+    trues = np.concatenate(trues, axis=0)
 
     preds = y_scaler.inverse_transform(preds)
     trues = y_scaler.inverse_transform(trues)
 
-    r2 = r2_score(trues, preds)
+    return metric_report(trues, preds)
 
-    mae = mean_absolute_error(trues, preds)
 
-    return r2, mae
+if __name__ == "__main__":
 
-# =========================================================
-# CELL 11 - TRAIN MODEL
-# =========================================================
+    model = MLP()
 
-model = MLP()
+    augmented_train_loader = build_augmented_train_loader(
+        X_train,
+        y_train,
+        x_scaler,
+        y_scaler,
+        batch_size=8192,
+    )
 
-model, history_df = train_model(
-    model,
-    "MLP"
-)
+    val_loader = DataLoader(
+        RegressionDataset(x_scaler.transform(X_val), y_scaler.transform(y_val)),
+        batch_size=8192,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=min(4, os.cpu_count() or 1),
+    )
 
-# =========================================================
-# CELL 12 - LOAD BEST MODEL
-# =========================================================
+    test_loader = DataLoader(
+        RegressionDataset(x_scaler.transform(X_test), y_scaler.transform(y_test)),
+        batch_size=8192,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=min(4, os.cpu_count() or 1),
+    )
 
-best_checkpoint = torch.load(
-    f"{SAVE_DIR}/MLP_best.pth",
-    map_location=device
-)
+    model, history_df = train_model(
+        model,
+        "MLP",
+        augmented_train_loader,
+        val_loader,
+        x_scaler,
+        y_scaler,
+        X_val,
+        y_val,
+    )
 
-model.load_state_dict(
-    best_checkpoint["model_state_dict"]
-)
+    best_checkpoint = torch.load(
+        f"{SAVE_DIR}/MLP_best.pth",
+        map_location=device
+    )
 
-print("Best Epoch:", best_checkpoint["epoch"])
-print("Best Val Loss:", best_checkpoint["val_loss"])
+    model.load_state_dict(
+        best_checkpoint["model_state_dict"]
+    )
 
-# =========================================================
-# CELL 13 - FINAL EVALUATION
-# =========================================================
+    print("Best Epoch:", best_checkpoint["epoch"])
+    print("Best Val Loss:", best_checkpoint["val_loss"])
+    print("Best Val Within 1%:", best_checkpoint.get("val_within_1pct", 0.0))
 
-r2, mae = evaluate(model)
+    print("\nFinal Test Results")
+    print_report("Random held-out test", evaluate_loader(model, test_loader, y_scaler))
 
-print("\nFinal Test Results")
-print(f"R2  : {r2:.8f}")
-print(f"MAE : {mae:.8f}")
+    edge_X, edge_y = make_edge_samples(50000)
+    edge_loader = DataLoader(
+        RegressionDataset(x_scaler.transform(edge_X), y_scaler.transform(edge_y)),
+        batch_size=8192,
+        shuffle=False,
+        pin_memory=True,
+    )
+    print_report("Edge boundary test", evaluate_loader(model, edge_loader, y_scaler))
 
-# =========================================================
-# CELL 14 - PLOT LOSS
-# =========================================================
+    low_X, low_y = select_low_output_samples(X_test, y_test, count=20000)
+    low_loader = DataLoader(
+        RegressionDataset(x_scaler.transform(low_X), y_scaler.transform(low_y)),
+        batch_size=8192,
+        shuffle=False,
+        pin_memory=True,
+    )
+    print_report("Low-output test", evaluate_loader(model, low_loader, y_scaler))
 
-plt.figure(figsize=(8, 5))
-
-plt.plot(
-    history_df["epoch"],
-    history_df["train_loss"],
-    label="Train Loss"
-)
-
-plt.plot(
-    history_df["epoch"],
-    history_df["val_loss"],
-    label="Validation Loss"
-)
-
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.title("Training History")
-
-plt.legend()
-
-plt.grid(True)
-
-plt.show()
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        history_df["epoch"],
+        history_df["train_loss"],
+        label="Train Loss"
+    )
+    plt.plot(
+        history_df["epoch"],
+        history_df["val_loss"],
+        label="Validation Loss"
+    )
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training History")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
