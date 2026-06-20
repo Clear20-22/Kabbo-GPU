@@ -2,6 +2,7 @@ from ultralytics import YOLO
 import torch
 import cv2
 import numpy as np
+import sys
 from pathlib import Path
 from PIL import Image
 
@@ -12,12 +13,53 @@ from torchvision.models import efficientnet_b0
 # PATHS
 # =====================================================
 
-YOLO_WEIGHTS = "runs/face_mask_yolo/weights/best.pt"
-CNN_WEIGHTS = "efficientnetb0_mask_status.pth"
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
 
-IMAGE_PATH = "test.jpg"
+YOLO_WEIGHTS = BASE_DIR / "runs" / "face_mask_yolo" / "weights" / "best.pt"
+CNN_WEIGHTS = BASE_DIR / "efficientnetb0_mask_status.pth"
 
-SAVE_DIR = "hybrid_results"
+DEFAULT_IMAGE_PATH = BASE_DIR / "test.jpg"
+SAMPLE_TEST_DIR = BASE_DIR / "faceMask" / "faceMask" / "SampleTest"
+
+SAVE_DIR = BASE_DIR / "hybrid_results"
+
+
+def resolve_image_path() -> Path:
+    if len(sys.argv) > 1:
+        candidate = Path(sys.argv[1]).expanduser()
+        if candidate.exists():
+            return candidate
+
+        for base_dir in (BASE_DIR, PROJECT_ROOT):
+            alternative = base_dir / candidate
+            if alternative.exists():
+                return alternative
+
+    for image_dir in (SAMPLE_TEST_DIR, DEFAULT_IMAGE_PATH.parent):
+        if image_dir.is_file() and image_dir.exists():
+            return image_dir
+
+        if image_dir.exists():
+            for extension in ("*.jpg", "*.jpeg", "*.png"):
+                for image_path in sorted(image_dir.glob(extension)):
+                    return image_path
+
+    for split_name in ("test", "val"):
+        split_root = BASE_DIR / "cnn_dataset" / "cnn_dataset" / split_name
+        for class_name in CLASS_NAMES:
+            class_dir = split_root / class_name
+            if not class_dir.exists():
+                continue
+
+            for extension in ("*.jpg", "*.jpeg", "*.png"):
+                for image_path in sorted(class_dir.glob(extension)):
+                    return image_path
+
+    raise FileNotFoundError(
+        "No input image found. Pass an image path as the first argument "
+        "or place test.jpg in the YOLO directory."
+    )
 
 # =====================================================
 # CLASSES
@@ -43,7 +85,10 @@ DEVICE = torch.device(
 
 print("Loading YOLO...")
 
-yolo_model = YOLO(YOLO_WEIGHTS)
+if not YOLO_WEIGHTS.exists():
+    raise FileNotFoundError(YOLO_WEIGHTS)
+
+yolo_model = YOLO(str(YOLO_WEIGHTS))
 
 # =====================================================
 # LOAD EFFICIENTNET-B0
@@ -51,18 +96,24 @@ yolo_model = YOLO(YOLO_WEIGHTS)
 
 print("Loading EfficientNet-B0...")
 
+checkpoint = torch.load(
+    str(CNN_WEIGHTS),
+    map_location=DEVICE,
+    weights_only=True
+)
+
+checkpoint_class_names = checkpoint.get("class_names", CLASS_NAMES)
+
 cnn_model = efficientnet_b0(weights=None)
 
 in_features = cnn_model.classifier[1].in_features
 
-cnn_model.classifier[1] = torch.nn.Linear(
-    in_features,
-    len(CLASS_NAMES)
-)
-
-checkpoint = torch.load(
-    CNN_WEIGHTS,
-    map_location=DEVICE
+cnn_model.classifier[1] = torch.nn.Sequential(
+    torch.nn.Dropout(p=0.35),
+    torch.nn.Linear(
+        in_features,
+        len(checkpoint_class_names)
+    )
 )
 
 cnn_model.load_state_dict(
@@ -91,7 +142,9 @@ transform = transforms.Compose([
 # LOAD IMAGE
 # =====================================================
 
-image_bgr = cv2.imread(IMAGE_PATH)
+IMAGE_PATH = resolve_image_path()
+
+image_bgr = cv2.imread(str(IMAGE_PATH))
 
 if image_bgr is None:
     raise FileNotFoundError(IMAGE_PATH)
@@ -108,7 +161,7 @@ image_rgb = cv2.cvtColor(
 print("Running YOLO...")
 
 results = yolo_model.predict(
-    source=IMAGE_PATH,
+    source=str(IMAGE_PATH),
     conf=0.25,
     imgsz=640,
     verbose=False
@@ -122,15 +175,15 @@ result = results[0]
 
 yolo_output = result.plot()
 
-Path(SAVE_DIR).mkdir(
+SAVE_DIR.mkdir(
     exist_ok=True,
     parents=True
 )
 
-YOLO_OUTPUT_PATH = f"{SAVE_DIR}/yolo_result.jpg"
+YOLO_OUTPUT_PATH = SAVE_DIR / "yolo_result.jpg"
 
 cv2.imwrite(
-    YOLO_OUTPUT_PATH,
+    str(YOLO_OUTPUT_PATH),
     yolo_output
 )
 
@@ -188,7 +241,7 @@ if result.boxes is not None:
                 dim=1
             )
 
-        pred_class = CLASS_NAMES[
+        pred_class = checkpoint_class_names[
             pred.item()
         ]
 
@@ -244,11 +297,11 @@ if result.boxes is not None:
 # =====================================================
 
 HYBRID_OUTPUT_PATH = (
-    f"{SAVE_DIR}/hybrid_result.jpg"
+    SAVE_DIR / "hybrid_result.jpg"
 )
 
 cv2.imwrite(
-    HYBRID_OUTPUT_PATH,
+    str(HYBRID_OUTPUT_PATH),
     hybrid_output
 )
 
