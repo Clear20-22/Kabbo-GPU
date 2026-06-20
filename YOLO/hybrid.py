@@ -1,253 +1,281 @@
-from __future__ import annotations
-
-import argparse
-import importlib
-from pathlib import Path
-from typing import List, Sequence, Tuple
-
+from ultralytics import YOLO
+import torch
 import cv2
 import numpy as np
-import torch
-from PIL import Image, ImageOps
+from pathlib import Path
+from PIL import Image
+
 from torchvision import transforms
-from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
+from torchvision.models import efficientnet_b0
 
+# =====================================================
+# PATHS
+# =====================================================
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DEFAULT_YOLO_WEIGHTS = PROJECT_DIR / "runs" / "face_mask_yolo" / "weights" / "best.pt"
-DEFAULT_CNN_WEIGHTS = PROJECT_DIR / "efficientnetb0_mask_status.pth"
-DEFAULT_SAVE_DIR = PROJECT_DIR / "hybrid_results"
-DEFAULT_CLASS_NAMES = ["mask_weared_incorrect", "with_mask", "without_mask"]
+YOLO_WEIGHTS = "runs/face_mask_yolo/weights/best.pt"
+CNN_WEIGHTS = "efficientnetb0_mask_status.pth"
 
-try:
-	LANCZOS = Image.Resampling.LANCZOS
-except AttributeError:  # pragma: no cover - older Pillow fallback
-	LANCZOS = Image.LANCZOS
+IMAGE_PATH = "test.jpg"
 
+SAVE_DIR = "hybrid_results"
 
-def load_yolo_class():
-	try:
-		return importlib.import_module("ultralytics").YOLO
-	except ModuleNotFoundError as exc:  # pragma: no cover - depends on local environment
-		raise ModuleNotFoundError(
-			"ultralytics is not installed. Install it first with: pip install ultralytics"
-		) from exc
+# =====================================================
+# CLASSES
+# =====================================================
 
+CLASS_NAMES = [
+    "mask_weared_incorrect",
+    "with_mask",
+    "without_mask"
+]
 
-def resolve_device(device_value: str | int) -> torch.device:
-	if isinstance(device_value, int):
-		return torch.device(f"cuda:{device_value}") if torch.cuda.is_available() else torch.device("cpu")
+# =====================================================
+# DEVICE
+# =====================================================
 
-	value = str(device_value).strip().lower()
-	if value == "cpu":
-		return torch.device("cpu")
-	if value.startswith("cuda") and torch.cuda.is_available():
-		if ":" in value:
-			return torch.device(value)
-		return torch.device("cuda:0")
-	return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
+# =====================================================
+# LOAD YOLO
+# =====================================================
 
-def build_cnn_model(num_classes: int):
-	model = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
-	in_features = model.classifier[1].in_features
-	model.classifier[1] = torch.nn.Sequential(
-		torch.nn.Dropout(p=0.35),
-		torch.nn.Linear(in_features, num_classes),
-	)
-	return model
+print("Loading YOLO...")
 
+yolo_model = YOLO(YOLO_WEIGHTS)
 
-def load_cnn_model(weights_path: Path, device: torch.device):
-	if not weights_path.exists():
-		raise FileNotFoundError(f"CNN weights file not found: {weights_path}")
+# =====================================================
+# LOAD EFFICIENTNET-B0
+# =====================================================
 
-	checkpoint = torch.load(weights_path, map_location=device)
-	class_names = checkpoint.get("class_names", DEFAULT_CLASS_NAMES)
-	image_size = int(checkpoint.get("image_size", 320))
+print("Loading EfficientNet-B0...")
 
-	model = build_cnn_model(len(class_names)).to(device)
-	model.load_state_dict(checkpoint["model_state"])
-	model.eval()
-	return model, class_names, image_size
+cnn_model = efficientnet_b0(weights=None)
 
+in_features = cnn_model.classifier[1].in_features
 
-def build_cnn_transform(image_size: int):
-	return transforms.Compose(
-		[
-			transforms.Lambda(lambda image: image.convert("RGB")),
-			transforms.Lambda(lambda image: ImageOps.pad(image, (image_size, image_size), method=LANCZOS, color=(114, 114, 114), centering=(0.5, 0.5))),
-			transforms.ToTensor(),
-			transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-		]
-	)
+cnn_model.classifier[1] = torch.nn.Linear(
+    in_features,
+    len(CLASS_NAMES)
+)
 
+checkpoint = torch.load(
+    CNN_WEIGHTS,
+    map_location=DEVICE
+)
 
-def load_image(source: Path) -> np.ndarray:
-	image = cv2.imread(str(source))
-	if image is None:
-		raise FileNotFoundError(f"Could not read image: {source}")
-	return image
+cnn_model.load_state_dict(
+    checkpoint["model_state"]
+)
 
+cnn_model.to(DEVICE)
+cnn_model.eval()
 
-def crop_with_padding(image_bgr: np.ndarray, box: Sequence[float], padding_ratio: float = 0.10) -> np.ndarray:
-	height, width = image_bgr.shape[:2]
-	x1, y1, x2, y2 = [float(value) for value in box]
-	box_width = x2 - x1
-	box_height = y2 - y1
+# =====================================================
+# TRANSFORM
+# =====================================================
 
-	pad_x = box_width * padding_ratio
-	pad_y = box_height * padding_ratio
+IMAGE_SIZE = checkpoint.get("image_size", 224)
 
-	left = max(int(x1 - pad_x), 0)
-	top = max(int(y1 - pad_y), 0)
-	right = min(int(x2 + pad_x), width)
-	bottom = min(int(y2 + pad_y), height)
+transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485,0.456,0.406],
+        std=[0.229,0.224,0.225]
+    )
+])
 
-	if right <= left or bottom <= top:
-		return image_bgr[max(int(y1), 0):min(int(y2), height), max(int(x1), 0):min(int(x2), width)]
-	return image_bgr[top:bottom, left:right]
+# =====================================================
+# LOAD IMAGE
+# =====================================================
 
+image_bgr = cv2.imread(IMAGE_PATH)
 
-@torch.no_grad()
-def classify_crop(model, crop_bgr: np.ndarray, transform, device: torch.device, class_names: Sequence[str]):
-	crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-	crop_pil = Image.fromarray(crop_rgb)
-	tensor = transform(crop_pil).unsqueeze(0).to(device)
-	logits = model(tensor)
-	probabilities = torch.softmax(logits, dim=1)[0]
-	confidence, prediction = probabilities.max(dim=0)
-	prediction_index = int(prediction.item())
-	return {
-		"class_name": class_names[prediction_index],
-		"confidence": float(confidence.item()),
-		"probabilities": {class_names[i]: float(probabilities[i].item()) for i in range(len(class_names))},
-	}
+if image_bgr is None:
+    raise FileNotFoundError(IMAGE_PATH)
 
+image_rgb = cv2.cvtColor(
+    image_bgr,
+    cv2.COLOR_BGR2RGB
+)
 
-def draw_text_box(image: np.ndarray, text: str, origin: Tuple[int, int], line_start: Tuple[int, int], color: Tuple[int, int, int]):
-	x, y = origin
-	font = cv2.FONT_HERSHEY_SIMPLEX
-	scale = 0.55
-	thickness = 2
-	(text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+# =====================================================
+# YOLO DETECTION
+# =====================================================
 
-	padding = 6
-	box_left = max(x, 0)
-	box_top = max(y - text_height - 2 * padding, 0)
-	box_right = min(box_left + text_width + 2 * padding, image.shape[1] - 1)
-	box_bottom = min(box_top + text_height + 2 * padding + baseline, image.shape[0] - 1)
+print("Running YOLO...")
 
-	cv2.rectangle(image, (box_left, box_top), (box_right, box_bottom), color, thickness=-1)
-	cv2.line(image, line_start, (box_left, box_bottom), color, 2)
-	cv2.putText(image, text, (box_left + padding, box_bottom - padding - baseline), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+results = yolo_model.predict(
+    source=IMAGE_PATH,
+    conf=0.25,
+    imgsz=640,
+    verbose=False
+)
 
+result = results[0]
 
-def annotate_yolo_only(result) -> np.ndarray:
-	return result.plot()
+# =====================================================
+# YOLO IMAGE
+# =====================================================
 
+yolo_output = result.plot()
 
-def annotate_hybrid(image_bgr: np.ndarray, detections, cnn_model, cnn_transform, device: torch.device, class_names: Sequence[str]) -> np.ndarray:
-	annotated = image_bgr.copy()
+Path(SAVE_DIR).mkdir(
+    exist_ok=True,
+    parents=True
+)
 
-	if detections.boxes is None or len(detections.boxes) == 0:
-		cv2.putText(annotated, "No faces detected", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
-		return annotated
+YOLO_OUTPUT_PATH = f"{SAVE_DIR}/yolo_result.jpg"
 
-	for index, box in enumerate(detections.boxes):
-		x1, y1, x2, y2 = [int(value) for value in box.xyxy[0].tolist()]
-		yolo_cls_id = int(box.cls.item())
-		yolo_label = detections.names[yolo_cls_id]
-		yolo_conf = float(box.conf.item()) * 100.0
+cv2.imwrite(
+    YOLO_OUTPUT_PATH,
+    yolo_output
+)
 
-		crop = crop_with_padding(image_bgr, (x1, y1, x2, y2), padding_ratio=0.12)
-		if crop.size == 0:
-			continue
+# =====================================================
+# HYBRID IMAGE
+# =====================================================
 
-		cnn_result = classify_crop(cnn_model, crop, cnn_transform, device, class_names)
-		cnn_label = cnn_result["class_name"]
-		cnn_conf = cnn_result["confidence"] * 100.0
+hybrid_output = image_bgr.copy()
 
-		color = (0, 200, 0) if cnn_label == "with_mask" else (0, 0, 255)
-		cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+# =====================================================
+# DETECTIONS
+# =====================================================
 
-		line_start = ((x1 + x2) // 2, y1)
-		text_origin = (x2 + 8, max(y1 - 6, 32) + index * 28)
-		text = f"YOLO {yolo_label} {yolo_conf:.1f}% | CNN {cnn_label} {cnn_conf:.1f}%"
-		draw_text_box(annotated, text, text_origin, line_start, color)
+if result.boxes is not None:
 
-	return annotated
+    for box in result.boxes:
 
+        x1,y1,x2,y2 = map(
+            int,
+            box.xyxy[0].tolist()
+        )
 
-def process_image(image_path: Path, yolo_weights: Path, cnn_weights: Path, save_dir: Path, imgsz: int, device_value: str | int, conf: float) -> None:
-	YOLO = load_yolo_class()
-	if not yolo_weights.exists():
-		raise FileNotFoundError(f"YOLO weights file not found: {yolo_weights}")
+        # ----------------------------------
+        # Crop Face
+        # ----------------------------------
 
-	device = resolve_device(device_value)
-	cnn_model, class_names, cnn_image_size = load_cnn_model(cnn_weights, device)
-	cnn_transform = build_cnn_transform(cnn_image_size)
+        face_crop = image_rgb[y1:y2, x1:x2]
 
-	yolo_model = YOLO(str(yolo_weights))
-	image_bgr = load_image(image_path)
-	detections = yolo_model.predict(source=str(image_path), imgsz=imgsz, conf=conf, device=device_value, verbose=False)[0]
+        if face_crop.size == 0:
+            continue
 
-	yolo_only = annotate_yolo_only(detections)
-	hybrid = annotate_hybrid(image_bgr, detections, cnn_model, cnn_transform, device, class_names)
+        # ----------------------------------
+        # CNN Prediction
+        # ----------------------------------
 
-	save_dir.mkdir(parents=True, exist_ok=True)
-	yolo_only_path = save_dir / f"{image_path.stem}_yolo_only.jpg"
-	hybrid_path = save_dir / f"{image_path.stem}_hybrid.jpg"
-	cv2.imwrite(str(yolo_only_path), yolo_only)
-	cv2.imwrite(str(hybrid_path), hybrid)
+        face_pil = Image.fromarray(face_crop)
 
-	print(f"Saved YOLO-only image: {yolo_only_path}")
-	print(f"Saved hybrid image: {hybrid_path}")
+        tensor = transform(face_pil)
 
-	print("\nDetections:")
-	if detections.boxes is None or len(detections.boxes) == 0:
-		print("  No faces detected.")
-		return
+        tensor = tensor.unsqueeze(0)
 
-	for box in detections.boxes:
-		x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
-		yolo_cls_id = int(box.cls.item())
-		yolo_label = detections.names[yolo_cls_id]
-		yolo_conf = float(box.conf.item()) * 100.0
-		crop = crop_with_padding(image_bgr, (x1, y1, x2, y2), padding_ratio=0.12)
-		cnn_result = classify_crop(cnn_model, crop, cnn_transform, device, class_names)
-		print(f"  YOLO={yolo_label} {yolo_conf:.2f}% -> CNN={cnn_result['class_name']} {cnn_result['confidence'] * 100.0:.2f}%")
+        tensor = tensor.to(DEVICE)
 
+        with torch.no_grad():
 
-def build_parser() -> argparse.ArgumentParser:
-	parser = argparse.ArgumentParser(description="Run YOLO detection, crop faces, classify crops with CNN, and save separate outputs.")
-	parser.add_argument("--image", type=Path, required=True, help="Input image path")
-	parser.add_argument("--yolo-weights", type=Path, default=DEFAULT_YOLO_WEIGHTS, help="Trained YOLO detector weights")
-	parser.add_argument("--cnn-weights", type=Path, default=DEFAULT_CNN_WEIGHTS, help="Trained CNN classifier checkpoint")
-	parser.add_argument("--save-dir", type=Path, default=DEFAULT_SAVE_DIR, help="Directory to save annotated outputs")
-	parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference image size")
-	parser.add_argument("--device", default=0, help="YOLO/CNN device, e.g. 0 or cpu")
-	parser.add_argument("--conf", type=float, default=0.25, help="YOLO confidence threshold")
-	return parser
+            logits = cnn_model(tensor)
 
+            probs = torch.softmax(
+                logits,
+                dim=1
+            )
 
-def main() -> None:
-	parser = build_parser()
-	args = parser.parse_args()
+            conf, pred = torch.max(
+                probs,
+                dim=1
+            )
 
-	if not args.image.exists():
-		raise FileNotFoundError(f"Input image not found: {args.image}")
+        pred_class = CLASS_NAMES[
+            pred.item()
+        ]
 
-	process_image(
-		image_path=args.image,
-		yolo_weights=args.yolo_weights,
-		cnn_weights=args.cnn_weights,
-		save_dir=args.save_dir,
-		imgsz=args.imgsz,
-		device_value=args.device,
-		conf=args.conf,
-	)
+        confidence = conf.item() * 100
 
+        # ----------------------------------
+        # Color
+        # ----------------------------------
 
-if __name__ == "__main__":
-	main()
+        if pred_class == "with_mask":
+            color = (0,255,0)
+
+        elif pred_class == "without_mask":
+            color = (0,0,255)
+
+        else:
+            color = (0,255,255)
+
+        # ----------------------------------
+        # Draw
+        # ----------------------------------
+
+        cv2.rectangle(
+            hybrid_output,
+            (x1,y1),
+            (x2,y2),
+            color,
+            2
+        )
+
+        label = (
+            f"{pred_class} "
+            f"{confidence:.1f}%"
+        )
+
+        cv2.putText(
+            hybrid_output,
+            label,
+            (x1, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            color,
+            2
+        )
+
+        print(
+            f"{pred_class} "
+            f"{confidence:.2f}%"
+        )
+
+# =====================================================
+# SAVE
+# =====================================================
+
+HYBRID_OUTPUT_PATH = (
+    f"{SAVE_DIR}/hybrid_result.jpg"
+)
+
+cv2.imwrite(
+    HYBRID_OUTPUT_PATH,
+    hybrid_output
+)
+
+# =====================================================
+# SHOW
+# =====================================================
+
+cv2.imshow(
+    "YOLO Detection",
+    yolo_output
+)
+
+cv2.imshow(
+    "Hybrid Prediction",
+    hybrid_output
+)
+
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+
+print()
+print("===================================")
+print("YOLO Result Saved:")
+print(YOLO_OUTPUT_PATH)
+
+print()
+
+print("Hybrid Result Saved:")
+print(HYBRID_OUTPUT_PATH)
+print("===================================")
