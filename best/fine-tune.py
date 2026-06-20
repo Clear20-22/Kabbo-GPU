@@ -7,6 +7,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 
+print("PyTorch version:", torch.__version__)
+
 
 SEED = 42
 
