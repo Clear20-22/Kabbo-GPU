@@ -3,6 +3,8 @@ import torch
 import cv2
 import numpy as np
 import sys
+import time
+import traceback
 from pathlib import Path
 from PIL import Image
 
@@ -19,10 +21,20 @@ PROJECT_ROOT = BASE_DIR.parent
 YOLO_WEIGHTS = BASE_DIR / "runs" / "face_mask_yolo" / "weights" / "best.pt"
 CNN_WEIGHTS = BASE_DIR / "efficientnetb0_mask_status.pth"
 
-DEFAULT_IMAGE_PATH = BASE_DIR / "test.jpg"
-SAMPLE_TEST_DIR = BASE_DIR / "faceMask" / "faceMask" / "SampleTest"
+DEFAULT_IMAGE_PATH = (
+    BASE_DIR
+    / "faceMask"
+    / "facemask"
+    / "test"
+    / "images"
+    / "maksssksksss106_png.rf.d412b83c46a92de2daaa6d4b57426160.jpg"
+)
 
 SAVE_DIR = BASE_DIR / "hybrid_results"
+
+
+def log(message: str) -> None:
+    print(f"[DEBUG] {message}")
 
 
 def resolve_image_path() -> Path:
@@ -36,29 +48,12 @@ def resolve_image_path() -> Path:
             if alternative.exists():
                 return alternative
 
-    for image_dir in (SAMPLE_TEST_DIR, DEFAULT_IMAGE_PATH.parent):
-        if image_dir.is_file() and image_dir.exists():
-            return image_dir
-
-        if image_dir.exists():
-            for extension in ("*.jpg", "*.jpeg", "*.png"):
-                for image_path in sorted(image_dir.glob(extension)):
-                    return image_path
-
-    for split_name in ("test", "val"):
-        split_root = BASE_DIR / "cnn_dataset" / "cnn_dataset" / split_name
-        for class_name in CLASS_NAMES:
-            class_dir = split_root / class_name
-            if not class_dir.exists():
-                continue
-
-            for extension in ("*.jpg", "*.jpeg", "*.png"):
-                for image_path in sorted(class_dir.glob(extension)):
-                    return image_path
+    if DEFAULT_IMAGE_PATH.exists():
+        return DEFAULT_IMAGE_PATH
 
     raise FileNotFoundError(
         "No input image found. Pass an image path as the first argument "
-        "or place test.jpg in the YOLO directory."
+        "or make sure the default test image exists."
     )
 
 # =====================================================
@@ -79,16 +74,34 @@ DEVICE = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
 )
 
+log(f"Torch version: {torch.__version__}")
+log(f"CUDA available: {torch.cuda.is_available()}")
+log(f"Selected device: {DEVICE}")
+log(f"Ultralytics version: {YOLO.__module__.split('.')[0] if hasattr(YOLO, '__module__') else 'unknown'}")
+
 # =====================================================
 # LOAD YOLO
 # =====================================================
 
 print("Loading YOLO...")
+log(f"YOLO weight path: {YOLO_WEIGHTS}")
+log(f"YOLO weight exists: {YOLO_WEIGHTS.exists()}")
 
 if not YOLO_WEIGHTS.exists():
     raise FileNotFoundError(YOLO_WEIGHTS)
 
-yolo_model = YOLO(str(YOLO_WEIGHTS))
+start_time = time.perf_counter()
+try:
+    log("Starting YOLO model load")
+    yolo_model = YOLO(str(YOLO_WEIGHTS))
+    log("Finished YOLO model load")
+except Exception:
+    log("YOLO model load failed")
+    traceback.print_exc()
+    raise
+finally:
+    elapsed = time.perf_counter() - start_time
+    print(f"YOLO load time: {elapsed:.3f}s")
 
 # =====================================================
 # LOAD EFFICIENTNET-B0
@@ -96,11 +109,25 @@ yolo_model = YOLO(str(YOLO_WEIGHTS))
 
 print("Loading EfficientNet-B0...")
 
-checkpoint = torch.load(
-    str(CNN_WEIGHTS),
-    map_location=DEVICE,
-    weights_only=True
-)
+log(f"CNN weight path: {CNN_WEIGHTS}")
+log(f"CNN weight exists: {CNN_WEIGHTS.exists()}")
+
+start_time = time.perf_counter()
+try:
+    log("Starting EfficientNet checkpoint load")
+    checkpoint = torch.load(
+        str(CNN_WEIGHTS),
+        map_location=DEVICE,
+        weights_only=True
+    )
+    log("Finished EfficientNet checkpoint load")
+except Exception:
+    log("EfficientNet checkpoint load failed")
+    traceback.print_exc()
+    raise
+finally:
+    elapsed = time.perf_counter() - start_time
+    print(f"EfficientNet load time: {elapsed:.3f}s")
 
 checkpoint_class_names = checkpoint.get("class_names", CLASS_NAMES)
 
@@ -143,11 +170,26 @@ transform = transforms.Compose([
 # =====================================================
 
 IMAGE_PATH = resolve_image_path()
+log(f"Resolved image path: {IMAGE_PATH}")
+log(f"Image exists: {IMAGE_PATH.exists()}")
 
-image_bgr = cv2.imread(str(IMAGE_PATH))
+start_time = time.perf_counter()
+try:
+    log("Starting OpenCV image read")
+    image_bgr = cv2.imread(str(IMAGE_PATH))
+    log("Finished OpenCV image read")
+except Exception:
+    log("OpenCV image read failed")
+    traceback.print_exc()
+    raise
+finally:
+    elapsed = time.perf_counter() - start_time
+    print(f"Image read time: {elapsed:.3f}s")
 
 if image_bgr is None:
     raise FileNotFoundError(IMAGE_PATH)
+
+log(f"Image shape (BGR): {image_bgr.shape}")
 
 image_rgb = cv2.cvtColor(
     image_bgr,
@@ -160,14 +202,28 @@ image_rgb = cv2.cvtColor(
 
 print("Running YOLO...")
 
-results = yolo_model.predict(
-    source=str(IMAGE_PATH),
-    conf=0.25,
-    imgsz=640,
-    verbose=False
-)
+start_time = time.perf_counter()
+try:
+    log("Starting YOLO prediction")
+    results = yolo_model.predict(
+        source=str(IMAGE_PATH),
+        conf=0.25,
+        imgsz=640,
+        verbose=True
+    )
+    log("Finished YOLO prediction")
+except Exception:
+    log("YOLO prediction failed")
+    traceback.print_exc()
+    raise
+finally:
+    elapsed = time.perf_counter() - start_time
+    print(f"YOLO prediction time: {elapsed:.3f}s")
 
 result = results[0]
+log(f"YOLO boxes available: {result.boxes is not None}")
+if result.boxes is not None:
+    log(f"YOLO box count: {len(result.boxes)}")
 
 # =====================================================
 # YOLO IMAGE
@@ -227,19 +283,30 @@ if result.boxes is not None:
 
         tensor = tensor.to(DEVICE)
 
-        with torch.no_grad():
+        start_time = time.perf_counter()
+        try:
+            log(f"Starting CNN inference for box {(x1, y1, x2, y2)}")
+            with torch.no_grad():
 
-            logits = cnn_model(tensor)
+                logits = cnn_model(tensor)
 
-            probs = torch.softmax(
-                logits,
-                dim=1
-            )
+                probs = torch.softmax(
+                    logits,
+                    dim=1
+                )
 
-            conf, pred = torch.max(
-                probs,
-                dim=1
-            )
+                conf, pred = torch.max(
+                    probs,
+                    dim=1
+                )
+            log("Finished CNN inference")
+        except Exception:
+            log("CNN inference failed")
+            traceback.print_exc()
+            raise
+        finally:
+            elapsed = time.perf_counter() - start_time
+            print(f"CNN prediction time: {elapsed:.3f}s")
 
         pred_class = checkpoint_class_names[
             pred.item()
