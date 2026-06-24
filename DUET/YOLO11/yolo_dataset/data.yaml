@@ -1,0 +1,19 @@
+path: C:/Users/User/Sojib/Kabbo-GPU/DUET/YOLO11/yolo_dataset
+train: images/train
+val: images/val
+test: images/test
+nc: 13
+names:
+  0: Rickshaw
+  1: Motorcycle
+  2: Tempu
+  3: Sedan Car
+  4: Pickup
+  5: Microbus
+  6: Mini Bus
+  7: Mini Truck
+  8: Agro Use
+  9: Medium Truck
+  10: Large Bus
+  11: Heavy Truck
+  12: Trailer

@@ -1,0 +1,53 @@
+{
+  "first": {
+    "path": "C:\\Users\\User\\Sojib\\Kabbo-GPU\\DUET\\RoadVision_DUET\\submissionss\\yolo11m.csv",
+    "rows": 327,
+    "detections": 18117,
+    "empty_prediction_rows": 0,
+    "malformed_prediction_rows": 0,
+    "class_counts": {
+      "10": 1932,
+      "3": 3172,
+      "2": 3532,
+      "0": 3413,
+      "4": 632,
+      "1": 2418,
+      "11": 412,
+      "9": 490,
+      "5": 461,
+      "12": 1082,
+      "6": 200,
+      "7": 249,
+      "8": 124
+    }
+  },
+  "second": {
+    "path": "C:\\Users\\User\\Sojib\\Kabbo-GPU\\DUET\\RoadVision_DUET\\submissionss\\yolo26.csv",
+    "rows": 327,
+    "detections": 15922,
+    "empty_prediction_rows": 0,
+    "malformed_prediction_rows": 0,
+    "class_counts": {
+      "3": 2492,
+      "10": 1543,
+      "2": 2698,
+      "0": 2945,
+      "1": 2143,
+      "7": 398,
+      "4": 804,
+      "9": 708,
+      "11": 472,
+      "12": 595,
+      "5": 695,
+      "6": 281,
+      "8": 148
+    }
+  },
+  "comparison": {
+    "shared_image_ids": 327,
+    "only_first": 0,
+    "only_second": 0,
+    "row_delta": 0,
+    "detection_delta": 2195
+  }
+}

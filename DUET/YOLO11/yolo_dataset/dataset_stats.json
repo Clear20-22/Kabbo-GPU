@@ -1,0 +1,52 @@
+{
+  "train_images": 688,
+  "val_images": 122,
+  "test_images": 327,
+  "train_boxes": 9051,
+  "val_boxes": 1424,
+  "class_names": [
+    "Rickshaw",
+    "Motorcycle",
+    "Tempu",
+    "Sedan Car",
+    "Pickup",
+    "Microbus",
+    "Mini Bus",
+    "Mini Truck",
+    "Agro Use",
+    "Medium Truck",
+    "Large Bus",
+    "Heavy Truck",
+    "Trailer"
+  ],
+  "train_class_counts": {
+    "0": 1406,
+    "1": 856,
+    "2": 1749,
+    "3": 2152,
+    "4": 232,
+    "5": 386,
+    "6": 143,
+    "7": 114,
+    "8": 68,
+    "9": 215,
+    "10": 1231,
+    "11": 194,
+    "12": 305
+  },
+  "val_class_counts": {
+    "0": 188,
+    "1": 137,
+    "2": 283,
+    "3": 328,
+    "4": 38,
+    "5": 69,
+    "6": 21,
+    "7": 13,
+    "8": 15,
+    "9": 50,
+    "10": 170,
+    "11": 45,
+    "12": 67
+  }
+}
